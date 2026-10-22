@@ -136,6 +136,9 @@ pub enum VoucherError {
     /// The new amount is not lower than the amount already escrowed, so
     /// there is nothing to give back.
     AmountNotReduced = 22,
+    /// The registry price changed between the quote the funder saw and this
+    /// call. Nothing was escrowed; re-quote before signing.
+    PriceChanged = 23,
 }
 
 /// Maps the shared helpers' failures onto this contract's error numbers, so

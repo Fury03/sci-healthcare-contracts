@@ -5,7 +5,9 @@ use soroban_sdk::{
     Address, Env, String, Vec,
 };
 
-use crate::{ProviderStatus, Registry, RegistryClient, RegistryError, MIN_PRICE_NOTICE_SECS};
+use crate::{
+    ProviderStatus, Registry, RegistryClient, RegistryError, MAX_PRICE_JUMP, MIN_PRICE_NOTICE_SECS,
+};
 
 struct Fixture {
     env: Env,
@@ -247,7 +249,7 @@ fn scheduled_price_applies_at_the_effective_time() {
     let effective_at = START + MIN_PRICE_NOTICE_SECS;
 
     f.client
-        .schedule_service_price(&provider, &CONSULT, &(PRICE * 2), &effective_at);
+        .schedule_service_price(&provider, &CONSULT, &(PRICE * 2), &effective_at, &false);
 
     // Before: the current price stands and the upcoming one is visible.
     assert_eq!(f.client.get_service_price(&provider, &CONSULT), PRICE);
@@ -283,13 +285,78 @@ fn scheduled_price_needs_the_minimum_notice() {
     for effective_at in [START, START + MIN_PRICE_NOTICE_SECS - 1] {
         let err = f
             .client
-            .try_schedule_service_price(&provider, &CONSULT, &(PRICE * 2), &effective_at)
+            .try_schedule_service_price(&provider, &CONSULT, &(PRICE * 2), &effective_at, &false)
             .err()
             .unwrap()
             .unwrap();
         assert_eq!(err, RegistryError::PriceNoticeTooShort);
     }
     assert_eq!(f.client.get_upcoming_price(&provider, &CONSULT), (0, 0));
+}
+
+#[test]
+fn large_price_jump_needs_explicit_confirmation() {
+    let f = setup();
+    let provider = priced_service(&f);
+    let effective_at = START + MIN_PRICE_NOTICE_SECS;
+    let five_times = PRICE * MAX_PRICE_JUMP as i128;
+
+    // A 5x rise is rejected unless the clinic acknowledges it.
+    let err = f
+        .client
+        .try_schedule_service_price(&provider, &CONSULT, &five_times, &effective_at, &false)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, RegistryError::LargePriceJumpNeedsConfirmation);
+    assert_eq!(f.client.get_upcoming_price(&provider, &CONSULT), (0, 0));
+
+    // A smaller rise still needs no flag.
+    let four_times = PRICE * 4;
+    f.client
+        .schedule_service_price(&provider, &CONSULT, &four_times, &effective_at, &false);
+    assert_eq!(
+        f.client.get_upcoming_price(&provider, &CONSULT),
+        (four_times, effective_at)
+    );
+
+    // With the flag the same 5x rise is accepted.
+    f.client
+        .schedule_service_price(&provider, &CONSULT, &five_times, &effective_at, &true);
+    assert_eq!(
+        f.client.get_upcoming_price(&provider, &CONSULT),
+        (five_times, effective_at)
+    );
+}
+
+#[test]
+fn large_price_jump_confirmation_cannot_skip_the_notice() {
+    let f = setup();
+    let provider = priced_service(&f);
+    let five_times = PRICE * MAX_PRICE_JUMP as i128;
+
+    let err = f
+        .client
+        .try_schedule_service_price(&provider, &CONSULT, &five_times, &START, &true)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, RegistryError::PriceNoticeTooShort);
+}
+
+#[test]
+fn price_jump_threshold_handles_overflow_as_a_large_jump() {
+    let f = setup();
+    let provider = priced_service(&f);
+    let effective_at = START + MIN_PRICE_NOTICE_SECS;
+
+    let err = f
+        .client
+        .try_schedule_service_price(&provider, &CONSULT, &i128::MAX, &effective_at, &false)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, RegistryError::LargePriceJumpNeedsConfirmation);
 }
 
 #[test]
@@ -300,10 +367,10 @@ fn rescheduling_replaces_the_earlier_schedule() {
     let second = START + 2 * MIN_PRICE_NOTICE_SECS;
 
     f.client
-        .schedule_service_price(&provider, &CONSULT, &(PRICE * 2), &first);
+        .schedule_service_price(&provider, &CONSULT, &(PRICE * 2), &first, &false);
     // Scheduling the current price is how a clinic calls a change off.
     f.client
-        .schedule_service_price(&provider, &CONSULT, &PRICE, &second);
+        .schedule_service_price(&provider, &CONSULT, &PRICE, &second, &false);
 
     f.env.ledger().with_mut(|li| li.timestamp = first);
     assert_eq!(f.client.get_service_price(&provider, &CONSULT), PRICE);
@@ -319,7 +386,7 @@ fn upsert_keeps_a_scheduled_price() {
     let provider = priced_service(&f);
     let effective_at = START + MIN_PRICE_NOTICE_SECS;
     f.client
-        .schedule_service_price(&provider, &CONSULT, &(PRICE * 2), &effective_at);
+        .schedule_service_price(&provider, &CONSULT, &(PRICE * 2), &effective_at, &false);
 
     f.client.upsert_service(
         &provider,
@@ -342,7 +409,7 @@ fn schedule_rejects_bad_input() {
 
     let err = f
         .client
-        .try_schedule_service_price(&provider, &CONSULT, &0i128, &effective_at)
+        .try_schedule_service_price(&provider, &CONSULT, &0i128, &effective_at, &false)
         .err()
         .unwrap()
         .unwrap();
@@ -350,7 +417,7 @@ fn schedule_rejects_bad_input() {
 
     let err = f
         .client
-        .try_schedule_service_price(&provider, &999u32, &PRICE, &effective_at)
+        .try_schedule_service_price(&provider, &999u32, &PRICE, &effective_at, &false)
         .err()
         .unwrap()
         .unwrap();
@@ -368,7 +435,7 @@ fn schedule_rejects_bad_input() {
         .set_provider_status(&f.admin, &provider, &ProviderStatus::Suspended);
     let err = f
         .client
-        .try_schedule_service_price(&provider, &CONSULT, &PRICE, &effective_at)
+        .try_schedule_service_price(&provider, &CONSULT, &PRICE, &effective_at, &false)
         .err()
         .unwrap()
         .unwrap();
@@ -942,7 +1009,13 @@ fn run_case(f: &AuthFixture, function: &str) -> std::vec::Vec<Address> {
         "schedule_service_price" => {
             activate(&f.f, &f.provider);
             upsert();
-            client.schedule_service_price(&f.provider, &CONSULT, &PRICE, &MIN_PRICE_NOTICE_SECS);
+            client.schedule_service_price(
+                &f.provider,
+                &CONSULT,
+                &PRICE,
+                &MIN_PRICE_NOTICE_SECS,
+                &false,
+            );
         }
         "get_upcoming_price" => {
             activate(&f.f, &f.provider);
@@ -1377,8 +1450,13 @@ fn service_price_scheduled_event_snapshot() {
         &PRICE,
     );
 
-    f.client
-        .schedule_service_price(&provider, &CONSULT, &(PRICE * 2), &MIN_PRICE_NOTICE_SECS);
+    f.client.schedule_service_price(
+        &provider,
+        &CONSULT,
+        &(PRICE * 2),
+        &MIN_PRICE_NOTICE_SECS,
+        &false,
+    );
 
     let e = one_event(&f);
     assert_layout(
