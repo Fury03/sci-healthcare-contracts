@@ -26,16 +26,16 @@ use sci_common as common;
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 
 pub use events::{
-    AdminChanged, AdminProposed, AttesterAdded, AttesterRemoved, Initialized, ProviderRegistered,
-    ProviderStatusChanged, ServiceAvailabilityChanged, ServicePriceScheduled, ServiceRemoved,
-    ServiceUpserted,
+    AdminChanged, AdminProposed, AttesterAdded, AttesterRemoved, CapacityChanged, Initialized,
+    ProviderRegistered, ProviderStatusChanged, ServiceAvailabilityChanged, ServicePriceScheduled,
+    ServiceRemoved, ServiceUpserted,
 };
 pub use types::{DataKey, Provider, ProviderStatus, RegistryError, ServiceItem};
 
 use storage::{
-    extend_instance, has_admin, has_provider, read_admin, read_attester, read_pending_admin,
-    read_provider, read_service, remove_service as storage_remove_service, write_admin,
-    write_attester, write_provider, write_service,
+    extend_instance, has_admin, has_provider, read_admin, read_attester, read_capacity,
+    read_pending_admin, read_provider, read_service, remove_service as storage_remove_service,
+    write_admin, write_attester, write_capacity, write_provider, write_service,
 };
 
 /// Least notice a clinic must give before a scheduled price takes effect.
@@ -50,6 +50,8 @@ pub const MIN_PRICE_NOTICE_SECS: u64 = 24 * 60 * 60;
 /// that is already scheduled. Lowering a price, or scheduling the current
 /// price to call a change off, never needs the flag.
 pub const MAX_PRICE_JUMP: u32 = 5;
+/// Most providers one `list_providers` call may return.
+pub use storage::MAX_PROVIDERS_PAGE;
 
 #[contract]
 pub struct Registry;
@@ -100,6 +102,12 @@ impl Registry {
         };
         write_provider(&env, &owner, &provider);
         extend_instance(&env);
+
+        // Append to the registration index so any app can enumerate clinics
+        // without an indexer, in registration order.
+        let count = storage::read_provider_count(&env);
+        storage::write_provider_at(&env, count, &owner);
+        storage::write_provider_count(&env, &(count + 1));
 
         ProviderRegistered {
             provider: owner,
@@ -315,6 +323,34 @@ impl Registry {
         Ok(())
     }
 
+    /// Declares how many vouchers this clinic can have outstanding (funded but
+    /// not yet settled or refunded) at once. `0` means unlimited, which is
+    /// also the default for a clinic that never sets it.
+    ///
+    /// `voucher` refuses to fund a new voucher at a clinic already at its
+    /// capacity (`ProviderAtCapacity`), so funders' money is not stuck at a
+    /// clinic that cannot see the patients before the vouchers expire.
+    /// Lowering the capacity below the current count affects only new
+    /// vouchers; outstanding ones settle or refund as normal.
+    pub fn set_capacity(
+        env: Env,
+        provider_addr: Address,
+        max_outstanding: u32,
+    ) -> Result<(), RegistryError> {
+        provider_addr.require_auth();
+
+        read_provider(&env, &provider_addr)?;
+        write_capacity(&env, &provider_addr, max_outstanding);
+        extend_instance(&env);
+
+        CapacityChanged {
+            provider: provider_addr,
+            max_outstanding,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
     /// Grants attester rights. Admin only.
     pub fn add_attester(env: Env, admin: Address, attester: Address) -> Result<(), RegistryError> {
         Self::require_admin(&env, &admin)?;
@@ -378,11 +414,36 @@ impl Registry {
         read_provider(&env, &provider_addr)
     }
 
+    /// Providers in registration order, paged by `start` and `limit`.
+    ///
+    /// `start` is the index of the first provider to return; `limit` is capped
+    /// at `MAX_PROVIDERS_PAGE` so one read cannot exceed host limits. Page by
+    /// calling again with `start += returned.len()`. An empty registry or a
+    /// `start` beyond the end returns an empty list. No signature is required;
+    /// this is the on-chain discovery any app or auditor can use instead of
+    /// trusting an indexer.
+    pub fn list_providers(env: Env, start: u32, limit: u32) -> Vec<Provider> {
+        storage::list_providers(&env, start, limit)
+    }
+
     /// The check `voucher` relies on before escrowing any funds.
     pub fn is_active_provider(env: Env, provider_addr: Address) -> bool {
         match read_provider(&env, &provider_addr) {
             Ok(p) => p.status == ProviderStatus::Active,
             Err(_) => false,
+        }
+    }
+
+    /// The country a provider is registered in, as an ISO 3166-1 alpha-2
+    /// code. Empty when the provider is not registered.
+    ///
+    /// The check `sponsor` relies on before matching a voucher for a clinic
+    /// in one of its countries. Declared over primitives so the two
+    /// contracts share no types.
+    pub fn get_provider_country(env: Env, provider_addr: Address) -> String {
+        match read_provider(&env, &provider_addr) {
+            Ok(p) => p.country,
+            Err(_) => String::from_str(&env, ""),
         }
     }
 
@@ -449,6 +510,12 @@ impl Registry {
 
     pub fn is_attester(env: Env, addr: Address) -> bool {
         read_attester(&env, &addr)
+    }
+
+    /// Most vouchers the clinic accepts outstanding at once; `0` is
+    /// unlimited. `voucher` reads this before funding.
+    pub fn get_capacity(env: Env, provider_addr: Address) -> u32 {
+        read_capacity(&env, &provider_addr)
     }
 
     /// Crate version this contract was built from, e.g. `"0.2.0"`.

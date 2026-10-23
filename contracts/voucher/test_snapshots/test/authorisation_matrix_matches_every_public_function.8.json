@@ -160,7 +160,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAATYON",
-              "function_name": "create_voucher",
+              "function_name": "create_voucher_with_options",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
@@ -179,6 +179,24 @@
                 },
                 {
                   "u64": "1702592000"
+                },
+                {
+                  "map": [
+                    {
+                      "key": {
+                        "symbol": "dispute_window"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
+                        "symbol": "presence_commitment"
+                      },
+                      "val": {
+                        "bytes": "98674f7a8bc35ee7bd499a22673abd361b19a3ab6de9b181c0af357082517e61"
+                      }
+                    }
+                  ]
                 }
               ]
             }
@@ -215,7 +233,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAATYON",
-              "function_name": "claim",
+              "function_name": "claim_with_proof",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -247,6 +265,9 @@
                 },
                 {
                   "u32": 1
+                },
+                {
+                  "bytes": "70617469656e7420736563726574"
                 }
               ]
             }
@@ -572,6 +593,57 @@
               "key": {
                 "vec": [
                   {
+                    "symbol": "ProviderAt"
+                  },
+                  {
+                    "u32": 0
+                  }
+                ]
+              },
+              "durability": "persistent",
+              "val": {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+              }
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 1555200
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5",
+              "key": {
+                "vec": [
+                  {
+                    "symbol": "ProviderCount"
+                  }
+                ]
+              },
+              "durability": "persistent",
+              "val": {
+                "u32": 1
+              }
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 1555200
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5",
+              "key": {
+                "vec": [
+                  {
                     "symbol": "Service"
                   },
                   {
@@ -696,6 +768,51 @@
                 "vec": [
                   {
                     "symbol": "Voucher"
+                    "symbol": "Exposure"
+                  },
+                  {
+                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                  }
+                ]
+              },
+              "durability": "persistent",
+              "val": {
+                "map": [
+                  {
+                    "key": {
+                      "symbol": "value"
+                    },
+                    "val": {
+                      "i128": "30000000"
+                    }
+                  },
+                  {
+                    "key": {
+                      "symbol": "vouchers"
+                    },
+                    "val": {
+                      "u32": 1
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 1555200
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAATYON",
+              "key": {
+                "vec": [
+                  {
+                    "symbol": "Options"
                   },
                   {
                     "u64": "1"
@@ -707,49 +824,62 @@
                 "map": [
                   {
                     "key": {
-                      "symbol": "amount"
+                      "symbol": "dispute_window"
                     },
-                    "val": {
-                      "i128": "30000000"
-                    }
+                    "val": "void"
                   },
                   {
                     "key": {
-                      "symbol": "attested_at"
+                      "symbol": "presence_commitment"
                     },
                     "val": {
                       "u64": "0"
+                      "bytes": "98674f7a8bc35ee7bd499a22673abd361b19a3ab6de9b181c0af357082517e61"
                     }
+                  }
+                ]
+              }
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 1555200
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAATYON",
+              "key": {
+                "vec": [
+                  {
+                    "symbol": "Voucher"
                   },
                   {
                     "key": {
                       "symbol": "attester"
                     },
                     "val": "void"
+                    "u64": "1"
+                  }
+                ]
+              },
+              "durability": "persistent",
+              "val": {
+                "vec": [
+                  {
+                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                   },
                   {
-                    "key": {
-                      "symbol": "beneficiary_ref"
-                    },
-                    "val": {
-                      "bytes": "0909090909090909090909090909090909090909090909090909090909090909"
-                    }
+                    "bytes": "0909090909090909090909090909090909090909090909090909090909090909"
                   },
                   {
-                    "key": {
-                      "symbol": "claimed_at"
-                    },
-                    "val": {
-                      "u64": "1700000000"
-                    }
+                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                   },
                   {
-                    "key": {
-                      "symbol": "created_at"
-                    },
-                    "val": {
-                      "u64": "1700000000"
-                    }
+                    "u32": 101
                   },
                   {
                     "key": {
@@ -758,46 +888,22 @@
                     "val": {
                       "u64": "0"
                     }
+                    "i128": "30000000"
                   },
                   {
-                    "key": {
-                      "symbol": "expires_at"
-                    },
-                    "val": {
-                      "u64": "1702592000"
-                    }
+                    "u32": 1
                   },
                   {
-                    "key": {
-                      "symbol": "funder"
-                    },
-                    "val": {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-                    }
+                    "u64": "1700000000"
                   },
                   {
-                    "key": {
-                      "symbol": "id"
-                    },
-                    "val": {
-                      "u64": "1"
-                    }
+                    "u64": "1702592000"
                   },
                   {
-                    "key": {
-                      "symbol": "provider"
-                    },
-                    "val": {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
-                    }
+                    "u64": "1700000000"
                   },
                   {
-                    "key": {
-                      "symbol": "service_code"
-                    },
-                    "val": {
-                      "u32": 101
-                    }
+                    "u64": "0"
                   },
                   {
                     "key": {
@@ -807,6 +913,9 @@
                       "u32": 4
                     }
                   }
+                    "u64": "0"
+                  },
+                  "void"
                 ]
               }
             }
@@ -1222,6 +1331,7 @@
             "topics": [
               {
                 "symbol": "voucher_disputed"
+                "symbol": "voucher_claimed"
               },
               {
                 "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
@@ -1243,6 +1353,10 @@
                   },
                   "val": {
                     "u32": 1
+                    "symbol": "claimed_at"
+                  },
+                  "val": {
+                    "u64": "1700000000"
                   }
                 },
                 {

@@ -1,13 +1,13 @@
 #![cfg(test)]
 
 use soroban_sdk::{
-    testutils::{Address as _, Ledger as _},
-    token, Address, BytesN, Env, String,
+    testutils::{Address as _, IssuerFlags, Ledger as _, StellarAssetContract},
+    token, Address, Bytes, BytesN, Env, String,
 };
 
 use crate::{
-    VoucherError, VoucherEscrow, VoucherEscrowClient, VoucherStatus,
-    DEFAULT_MAX_ATTESTATIONS_PER_DAY,
+    Exposure, VoucherError, VoucherEscrow, VoucherEscrowClient, VoucherOptions, VoucherStatus,
+    DEFAULT_DISPUTE_WINDOW_BOUNDS, DEFAULT_MAX_ATTESTATIONS_PER_DAY,
 };
 use sci_receipt::{ReceiptBook, ReceiptBookClient};
 use sci_registry::{ProviderStatus, Registry, RegistryClient, MIN_PRICE_NOTICE_SECS};
@@ -27,6 +27,8 @@ struct Fixture {
     registry: RegistryClient<'static>,
     receipts: ReceiptBookClient<'static>,
     token: token::Client<'static>,
+    /// The settlement token's issuer side, for clawback and freeze tests.
+    sac: StellarAssetContract,
     admin: Address,
     funder: Address,
     provider: Address,
@@ -104,6 +106,7 @@ fn setup_with(fee_bps: u32, attester_share_bps: u32) -> Fixture {
         registry,
         receipts,
         token: token_client,
+        sac,
         admin,
         funder,
         provider,
@@ -412,6 +415,126 @@ fn cannot_fund_paused_service() {
     f.registry
         .set_service_available(&f.provider, &CONSULT, &true);
     assert_eq!(fund(&f), 1);
+}
+
+// ----- redirecting a funded voucher -----
+
+fn register_redirect_provider(f: &Fixture) -> Address {
+    let provider = Address::generate(&f.env);
+    f.registry.register_provider(
+        &provider,
+        &String::from_str(&f.env, "New Clinic"),
+        &String::from_str(&f.env, "NG"),
+    );
+    f.registry
+        .set_provider_status(&f.admin, &provider, &ProviderStatus::Active);
+    provider
+}
+
+#[test]
+fn redirect_moves_a_funded_voucher_and_emits_event() {
+    let f = setup();
+    let id = fund(&f);
+    let new_provider = register_redirect_provider(&f);
+    f.registry.upsert_service(
+        &new_provider,
+        &CONSULT,
+        &String::from_str(&f.env, "Outpatient consult"),
+        &CONSULT_PRICE,
+    );
+
+    f.voucher.redirect(&f.funder, &id, &new_provider);
+
+    let e = one_event(&f);
+    assert_layout(
+        &e,
+        "voucher_redirected",
+        &[ScVal::from(&f.funder), ScVal::from(&new_provider)],
+        &["voucher_id", "previous_provider", "service_code"],
+    );
+    assert_eq!(field_u64(&e, "voucher_id"), id);
+    assert_eq!(field_u32(&e, "service_code"), CONSULT);
+    assert_eq!(field(&e, "previous_provider"), ScVal::from(&f.provider));
+
+    let voucher = f.voucher.get_voucher(&id);
+    assert_eq!(voucher.provider, new_provider);
+    assert_eq!(voucher.status, VoucherStatus::Funded);
+    assert_eq!(voucher.amount, CONSULT_PRICE);
+}
+
+#[test]
+fn cannot_redirect_to_an_inactive_provider() {
+    let f = setup();
+    let id = fund(&f);
+    let new_provider = register_redirect_provider(&f);
+    f.registry
+        .set_provider_status(&f.admin, &new_provider, &ProviderStatus::Suspended);
+
+    let err = f
+        .voucher
+        .try_redirect(&f.funder, &id, &new_provider)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, VoucherError::ProviderNotActive);
+}
+
+#[test]
+fn cannot_redirect_to_a_provider_without_the_service() {
+    let f = setup();
+    let id = fund(&f);
+    let new_provider = register_redirect_provider(&f);
+
+    let err = f
+        .voucher
+        .try_redirect(&f.funder, &id, &new_provider)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, VoucherError::ServiceNotOffered);
+}
+
+#[test]
+fn cannot_redirect_when_new_provider_price_exceeds_voucher_amount() {
+    let f = setup();
+    let id = fund(&f);
+    let new_provider = register_redirect_provider(&f);
+    f.registry.upsert_service(
+        &new_provider,
+        &CONSULT,
+        &String::from_str(&f.env, "Outpatient consult"),
+        &(CONSULT_PRICE + 1),
+    );
+
+    let err = f
+        .voucher
+        .try_redirect(&f.funder, &id, &new_provider)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, VoucherError::AmountBelowPrice);
+}
+
+#[test]
+fn cannot_redirect_a_claimed_voucher() {
+    let f = setup();
+    let id = fund(&f);
+    f.voucher.claim(&f.provider, &id);
+    let new_provider = register_redirect_provider(&f);
+    f.registry.upsert_service(
+        &new_provider,
+        &CONSULT,
+        &String::from_str(&f.env, "Outpatient consult"),
+        &CONSULT_PRICE,
+    );
+
+    let err = f
+        .voucher
+        .try_redirect(&f.funder, &id, &new_provider)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, VoucherError::InvalidStatus);
 }
 
 #[test]
@@ -2373,6 +2496,7 @@ const AUTH_MATRIX: &[AuthCase] = &[
     },
     AuthCase {
         function: "create_voucher_at_price",
+        function: "create_voucher_with_options",
         auth: signer("`funder`", funder_addr),
     },
     AuthCase {
@@ -2380,7 +2504,15 @@ const AUTH_MATRIX: &[AuthCase] = &[
         auth: signer("`funder`", funder_addr),
     },
     AuthCase {
+        function: "redirect",
+        auth: signer("`funder`", funder_addr),
+    },
+    AuthCase {
         function: "claim",
+        auth: signer("`provider`", provider_addr),
+    },
+    AuthCase {
+        function: "claim_with_proof",
         auth: signer("`provider`", provider_addr),
     },
     AuthCase {
@@ -2412,12 +2544,36 @@ const AUTH_MATRIX: &[AuthCase] = &[
         auth: signer("`admin`", admin_addr),
     },
     AuthCase {
+        function: "set_dispute_window_bounds",
+        auth: signer("`admin`", admin_addr),
+    },
+    AuthCase {
+        function: "set_max_escrow_per_provider",
+        auth: signer("`admin`", admin_addr),
+    },
+    AuthCase {
         function: "propose_admin",
         auth: signer("`admin`", admin_addr),
     },
     AuthCase {
         function: "accept_admin",
         auth: signer("`new_admin`", new_admin_addr),
+    },
+    AuthCase {
+        function: "get_dispute_window_bounds",
+        auth: Auth::Free("none (view)"),
+    },
+    AuthCase {
+        function: "get_voucher_options",
+        auth: Auth::Free("none (view)"),
+    },
+    AuthCase {
+        function: "get_max_escrow_per_provider",
+        auth: Auth::Free("none (view)"),
+    },
+    AuthCase {
+        function: "get_exposure",
+        auth: Auth::Free("none (view)"),
     },
     AuthCase {
         function: "get_attestation_cap",
@@ -2509,14 +2665,55 @@ fn run_case(f: &AuthFixture, function: &str) -> std::vec::Vec<Address> {
                 &(START_TIME + 30 * 24 * 60 * 60),
                 &CONSULT_PRICE,
             );
+        "create_voucher_with_options" => {
+            fund_with(&f.f, &VoucherOptions::default());
         }
         "reduce_amount" => {
             let id = fund_overpaid(&f.f, CONSULT_PRICE * 2);
             voucher.reduce_amount(&f.f.funder, &id, &CONSULT_PRICE);
         }
+        "redirect" => {
+            let id = fund(&f.f);
+            let provider = Address::generate(env);
+            f.f.registry.register_provider(
+                &provider,
+                &String::from_str(env, "New Clinic"),
+                &String::from_str(env, "NG"),
+            );
+            f.f.registry
+                .set_provider_status(&f.f.admin, &provider, &ProviderStatus::Active);
+            f.f.registry.upsert_service(
+                &provider,
+                &CONSULT,
+                &String::from_str(env, "Outpatient consult"),
+                &CONSULT_PRICE,
+            );
+            voucher.redirect(&f.f.funder, &id, &provider);
+        }
         "claim" => {
             let id = fund(&f.f);
             voucher.claim(&f.f.provider, &id);
+        }
+        "claim_with_proof" => {
+            let secret = Bytes::from_slice(env, b"patient secret");
+            let id = fund_with(
+                &f.f,
+                &VoucherOptions {
+                    presence_commitment: Some(commit(env, &secret)),
+                    dispute_window: None,
+                },
+            );
+            voucher.claim_with_proof(&f.f.provider, &id, &secret);
+        }
+        "set_dispute_window_bounds" => {
+            voucher.set_dispute_window_bounds(&f.f.admin, &60, &(60 * 60));
+        }
+        "get_dispute_window_bounds" => {
+            voucher.get_dispute_window_bounds();
+        }
+        "get_voucher_options" => {
+            let id = fund(&f.f);
+            voucher.get_voucher_options(&id);
         }
         "attest" => {
             let id = fund(&f.f);
@@ -2554,6 +2751,15 @@ fn run_case(f: &AuthFixture, function: &str) -> std::vec::Vec<Address> {
         }
         "set_attestation_cap" => {
             voucher.set_attestation_cap(&f.f.admin, &10);
+        }
+        "set_max_escrow_per_provider" => {
+            voucher.set_max_escrow_per_provider(&f.f.admin, &CONSULT_PRICE);
+        }
+        "get_max_escrow_per_provider" => {
+            voucher.get_max_escrow_per_provider();
+        }
+        "get_exposure" => {
+            voucher.get_exposure(&f.f.provider);
         }
         "get_attestation_cap" => {
             voucher.get_attestation_cap();
@@ -3142,6 +3348,533 @@ fn admin_changed_event_snapshot() {
     assert_eq!(field_address(&f.env, &e, "new_admin"), nominee);
 }
 
+// ----- voucher options: presence proof and per-voucher dispute window -----
+
+fn fund_with(f: &Fixture, options: &VoucherOptions) -> u64 {
+    f.voucher.create_voucher_with_options(
+        &f.funder,
+        &patient(&f.env),
+        &f.provider,
+        &CONSULT,
+        &CONSULT_PRICE,
+        &(START_TIME + 30 * 24 * 60 * 60),
+        options,
+    )
+}
+
+fn commit(env: &Env, secret: &Bytes) -> BytesN<32> {
+    env.crypto().sha256(secret).to_bytes()
+}
+
+fn committed(f: &Fixture, secret: &[u8]) -> u64 {
+    let secret = Bytes::from_slice(&f.env, secret);
+    fund_with(
+        f,
+        &VoucherOptions {
+            presence_commitment: Some(commit(&f.env, &secret)),
+            dispute_window: None,
+        },
+    )
+}
+
+fn windowed(f: &Fixture, window: u64) -> u64 {
+    fund_with(
+        f,
+        &VoucherOptions {
+            presence_commitment: None,
+            dispute_window: Some(window),
+        },
+    )
+}
+
+#[test]
+fn committed_voucher_claims_with_the_right_secret() {
+    let f = setup();
+    let id = committed(&f, b"4471-ana");
+
+    f.voucher
+        .claim_with_proof(&f.provider, &id, &Bytes::from_slice(&f.env, b"4471-ana"));
+
+    let v = f.voucher.get_voucher(&id);
+    assert_eq!(v.status, VoucherStatus::Claimed);
+    assert_eq!(v.claimed_at, START_TIME);
+}
+
+#[test]
+fn committed_voucher_rejects_the_wrong_secret() {
+    let f = setup();
+    let id = committed(&f, b"4471-ana");
+
+    assert_eq!(
+        f.voucher
+            .try_claim_with_proof(&f.provider, &id, &Bytes::from_slice(&f.env, b"4471-anb")),
+        Err(Ok(VoucherError::InvalidPresenceProof))
+    );
+    assert_eq!(f.voucher.get_voucher(&id).status, VoucherStatus::Funded);
+}
+
+#[test]
+fn committed_voucher_refuses_a_plain_claim() {
+    let f = setup();
+    let id = committed(&f, b"4471-ana");
+
+    assert_eq!(
+        f.voucher.try_claim(&f.provider, &id),
+        Err(Ok(VoucherError::PresenceProofRequired))
+    );
+}
+
+#[test]
+fn proof_on_an_uncommitted_voucher_is_rejected() {
+    let f = setup();
+    let id = fund(&f);
+
+    assert_eq!(
+        f.voucher
+            .try_claim_with_proof(&f.provider, &id, &Bytes::from_slice(&f.env, b"anything")),
+        Err(Ok(VoucherError::NoPresenceCommitment))
+    );
+    // The plain path is unchanged for it.
+    f.voucher.claim(&f.provider, &id);
+    assert_eq!(f.voucher.get_voucher(&id).status, VoucherStatus::Claimed);
+}
+
+#[test]
+fn proof_still_needs_the_named_provider() {
+    let f = setup();
+    let id = committed(&f, b"4471-ana");
+    let other = Address::generate(&f.env);
+
+    assert_eq!(
+        f.voucher
+            .try_claim_with_proof(&other, &id, &Bytes::from_slice(&f.env, b"4471-ana")),
+        Err(Ok(VoucherError::NotAuthorized))
+    );
+}
+
+#[test]
+fn committed_voucher_settles_like_any_other() {
+    let f = setup();
+    let id = committed(&f, b"4471-ana");
+    f.voucher
+        .claim_with_proof(&f.provider, &id, &Bytes::from_slice(&f.env, b"4471-ana"));
+    f.voucher.attest(&f.attester, &id);
+    advance(&f.env, DISPUTE_WINDOW + 1);
+    f.voucher.settle(&id);
+    assert_eq!(f.voucher.get_voucher(&id).status, VoucherStatus::Settled);
+}
+
+#[test]
+fn options_are_readable_and_plain_vouchers_have_none() {
+    let f = setup();
+    let plain = fund(&f);
+    assert_eq!(
+        f.voucher.get_voucher_options(&plain),
+        VoucherOptions::default()
+    );
+
+    let secret = Bytes::from_slice(&f.env, b"s");
+    let options = VoucherOptions {
+        presence_commitment: Some(commit(&f.env, &secret)),
+        dispute_window: Some(5 * 24 * 60 * 60),
+    };
+    let id = fund_with(&f, &options);
+    assert_eq!(f.voucher.get_voucher_options(&id), options);
+
+    assert_eq!(
+        f.voucher.try_get_voucher_options(&99),
+        Err(Ok(VoucherError::VoucherNotFound))
+    );
+}
+
+#[test]
+fn plain_voucher_writes_no_options_entry() {
+    let f = setup();
+    let id = fund(&f);
+    let exists = f.env.as_contract(&f.voucher.address, || {
+        f.env
+            .storage()
+            .persistent()
+            .has(&crate::DataKey::Options(id))
+    });
+    assert!(
+        !exists,
+        "a voucher without options must not pay for a second entry"
+    );
+}
+
+#[test]
+fn default_dispute_window_is_unchanged() {
+    let f = setup();
+    let id = fund(&f);
+    f.voucher.claim(&f.provider, &id);
+    f.voucher.attest(&f.attester, &id);
+    assert_eq!(
+        f.voucher.get_voucher(&id).dispute_deadline,
+        START_TIME + DISPUTE_WINDOW
+    );
+}
+
+#[test]
+fn short_and_long_windows_set_their_own_deadline() {
+    let f = setup();
+    let day = 24 * 60 * 60;
+
+    for window in [day, 10 * day, 30 * day] {
+        let id = windowed(&f, window);
+        f.voucher.claim(&f.provider, &id);
+        let now = f.env.ledger().timestamp();
+        f.voucher.attest(&f.attester, &id);
+        assert_eq!(f.voucher.get_voucher(&id).dispute_deadline, now + window);
+    }
+}
+
+#[test]
+fn short_window_settles_early_and_long_window_waits() {
+    let f = setup();
+    let day = 24 * 60 * 60;
+    let short = windowed(&f, day);
+    let long = windowed(&f, 10 * day);
+    for id in [short, long] {
+        f.voucher.claim(&f.provider, &id);
+        f.voucher.attest(&f.attester, &id);
+    }
+
+    advance(&f.env, day);
+    f.voucher.settle(&short);
+    assert_eq!(
+        f.voucher.try_settle(&long),
+        Err(Ok(VoucherError::DisputeWindowOpen))
+    );
+    // The funder of the long voucher can still dispute.
+    f.voucher.dispute(&f.funder, &long, &1u32);
+}
+
+#[test]
+fn dispute_window_outside_the_bounds_is_rejected() {
+    let f = setup();
+    let (min, max) = DEFAULT_DISPUTE_WINDOW_BOUNDS;
+    let try_window = |window: u64| {
+        f.voucher.try_create_voucher_with_options(
+            &f.funder,
+            &patient(&f.env),
+            &f.provider,
+            &CONSULT,
+            &CONSULT_PRICE,
+            &(START_TIME + 30 * 24 * 60 * 60),
+            &VoucherOptions {
+                presence_commitment: None,
+                dispute_window: Some(window),
+            },
+        )
+    };
+
+    assert_eq!(
+        try_window(min - 1),
+        Err(Ok(VoucherError::InvalidDisputeWindow))
+    );
+    assert_eq!(
+        try_window(max + 1),
+        Err(Ok(VoucherError::InvalidDisputeWindow))
+    );
+    assert_eq!(try_window(0), Err(Ok(VoucherError::InvalidDisputeWindow)));
+    assert!(try_window(min).is_ok());
+    assert!(try_window(max).is_ok());
+}
+
+#[test]
+fn admin_moves_the_dispute_window_bounds() {
+    let f = setup();
+    assert_eq!(
+        f.voucher.get_dispute_window_bounds(),
+        DEFAULT_DISPUTE_WINDOW_BOUNDS
+    );
+
+    f.voucher
+        .set_dispute_window_bounds(&f.admin, &60, &(2 * 60 * 60));
+    assert_eq!(f.voucher.get_dispute_window_bounds(), (60, 2 * 60 * 60));
+
+    let id = windowed(&f, 60);
+    f.voucher.claim(&f.provider, &id);
+    f.voucher.attest(&f.attester, &id);
+    assert_eq!(f.voucher.get_voucher(&id).dispute_deadline, START_TIME + 60);
+}
+
+#[test]
+fn dispute_window_bounds_are_checked() {
+    let f = setup();
+    let stranger = Address::generate(&f.env);
+    assert_eq!(
+        f.voucher
+            .try_set_dispute_window_bounds(&stranger, &60, &120),
+        Err(Ok(VoucherError::NotAuthorized))
+    );
+    assert_eq!(
+        f.voucher.try_set_dispute_window_bounds(&f.admin, &0, &120),
+        Err(Ok(VoucherError::InvalidDisputeWindow))
+    );
+    assert_eq!(
+        f.voucher
+            .try_set_dispute_window_bounds(&f.admin, &121, &120),
+        Err(Ok(VoucherError::InvalidDisputeWindow))
+    );
+}
+
+#[test]
+fn dispute_window_bounds_changed_event_snapshot() {
+    let f = setup();
+
+    f.voucher
+        .set_dispute_window_bounds(&f.admin, &3600, &86_400);
+
+    let e = one_event(&f);
+    assert_layout(
+        &e,
+        "dispute_window_bounds_changed",
+        &[ScVal::from(&f.admin)],
+        &["min", "max"],
+    );
+    assert_eq!(field_u64(&e, "min"), 3600);
+    assert_eq!(field_u64(&e, "max"), 86_400);
+}
+
+// ----- storage footprint -----
+
+/// The voucher entry is stored positionally (an XDR vec) without its id
+/// instead of as a named struct (an XDR map carrying every field name). This
+/// pins that the stored form is smaller and prints both sizes, which are the
+/// numbers rent is charged on.
+#[test]
+fn stored_voucher_is_smaller_than_the_named_layout() {
+    use soroban_sdk::xdr::ToXdr;
+
+    let f = setup();
+    let id = fund(&f);
+    f.voucher.claim(&f.provider, &id);
+    f.voucher.attest(&f.attester, &id);
+    let voucher = f.voucher.get_voucher(&id);
+
+    let named = voucher.clone().to_xdr(&f.env).len();
+    let stored = f.env.as_contract(&f.voucher.address, || {
+        let stored: crate::storage::StoredVoucher = f
+            .env
+            .storage()
+            .persistent()
+            .get(&crate::DataKey::Voucher(id))
+            .expect("the voucher is stored");
+        stored.to_xdr(&f.env).len()
+    });
+
+    std::println!(
+        "voucher entry value: {named} bytes as a named struct, {stored} bytes as stored \
+         ({}% smaller)",
+        (named - stored) * 100 / named
+    );
+    assert!(
+        stored < named,
+        "the stored voucher ({stored} B) must be smaller than the named layout ({named} B)"
+    );
+}
+
+/// Every field survives the positional layout: what is read back is what was
+/// written, field for field, through a full lifecycle.
+#[test]
+fn stored_voucher_round_trips_every_field() {
+    let f = setup();
+    let id = fund(&f);
+    advance(&f.env, 10);
+    f.voucher.claim(&f.provider, &id);
+    advance(&f.env, 10);
+    f.voucher.attest(&f.attester, &id);
+
+    let v = f.voucher.get_voucher(&id);
+    assert_eq!(v.id, id);
+    assert_eq!(v.funder, f.funder);
+    assert_eq!(v.beneficiary_ref, patient(&f.env));
+    assert_eq!(v.provider, f.provider);
+    assert_eq!(v.service_code, CONSULT);
+    assert_eq!(v.amount, CONSULT_PRICE);
+    assert_eq!(v.status, VoucherStatus::Attested);
+    assert_eq!(v.created_at, START_TIME);
+    assert_eq!(v.expires_at, START_TIME + 30 * 24 * 60 * 60);
+    assert_eq!(v.claimed_at, START_TIME + 10);
+    assert_eq!(v.attested_at, START_TIME + 20);
+    assert_eq!(v.dispute_deadline, START_TIME + 20 + DISPUTE_WINDOW);
+}
+
+// ----- clawback and frozen settlement token -----
+//
+// USDC's issuer can claw funds back from any balance and freeze
+// (deauthorize) one. Escrow is one shared balance, so these tests check that
+// every payout path fails with a named error and reverts cleanly instead of
+// panicking inside the token or paying out part of a voucher.
+
+/// The issuer-side client of the settlement token, with clawback and
+/// revocation enabled. Call before funding: a balance records whether it can
+/// be clawed back when it is created.
+fn issuer_with_clawback(f: &Fixture) -> token::StellarAssetClient<'static> {
+    let issuer = f.sac.issuer();
+    issuer.set_flag(IssuerFlags::RevocableFlag);
+    issuer.set_flag(IssuerFlags::ClawbackEnabledFlag);
+    token::StellarAssetClient::new(&f.env, &f.sac.address())
+}
+
+fn attested(f: &Fixture) -> u64 {
+    let id = claimed(f);
+    f.voucher.attest(&f.attester, &id);
+    advance(&f.env, DISPUTE_WINDOW + 1);
+    id
+}
+
+#[test]
+fn clawback_then_settle_returns_escrow_shortfall() {
+    let f = setup();
+    let issuer = issuer_with_clawback(&f);
+    let id = attested(&f);
+    issuer.clawback(&f.voucher.address, &1);
+
+    let err = f.voucher.try_settle(&id).err().unwrap().unwrap();
+    assert_eq!(err, VoucherError::EscrowShortfall);
+    // Nothing moved and nothing was recorded.
+    assert_eq!(f.voucher.get_voucher(&id).status, VoucherStatus::Attested);
+    assert_eq!(f.token.balance(&f.provider), 0);
+    assert_eq!(f.receipts.count_for(&patient(&f.env)), 0);
+}
+
+#[test]
+fn clawback_then_refund_returns_escrow_shortfall() {
+    let f = setup();
+    let issuer = issuer_with_clawback(&f);
+    let id = fund(&f);
+    issuer.clawback(&f.voucher.address, &1);
+    advance(&f.env, 31 * 24 * 60 * 60);
+
+    let err = f.voucher.try_refund(&id).err().unwrap().unwrap();
+    assert_eq!(err, VoucherError::EscrowShortfall);
+    assert_eq!(f.voucher.get_voucher(&id).status, VoucherStatus::Funded);
+}
+
+#[test]
+fn clawback_then_resolving_a_dispute_returns_escrow_shortfall() {
+    let f = setup();
+    let issuer = issuer_with_clawback(&f);
+    let id = claimed(&f);
+    f.voucher.dispute(&f.funder, &id, &1u32);
+    issuer.clawback(&f.voucher.address, &1);
+
+    for refund_funder in [true, false] {
+        let err = f
+            .voucher
+            .try_resolve_dispute(&f.admin, &id, &refund_funder)
+            .err()
+            .unwrap()
+            .unwrap();
+        assert_eq!(err, VoucherError::EscrowShortfall);
+    }
+    let err = f
+        .voucher
+        .try_resolve_split(&f.admin, &id, &(CONSULT_PRICE / 2))
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, VoucherError::EscrowShortfall);
+    assert_eq!(f.voucher.get_voucher(&id).status, VoucherStatus::Disputed);
+}
+
+#[test]
+fn clawback_then_reducing_the_amount_returns_escrow_shortfall() {
+    let f = setup();
+    let issuer = issuer_with_clawback(&f);
+    let id = fund_overpaid(&f, CONSULT_PRICE * 2);
+    issuer.clawback(&f.voucher.address, &1);
+
+    let err = f
+        .voucher
+        .try_reduce_amount(&f.funder, &id, &CONSULT_PRICE)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, VoucherError::EscrowShortfall);
+    assert_eq!(f.voucher.get_voucher(&id).amount, CONSULT_PRICE * 2);
+}
+
+#[test]
+fn partial_clawback_falls_on_the_last_voucher_out() {
+    let f = setup();
+    let issuer = issuer_with_clawback(&f);
+    let first = claimed(&f);
+    let second = claimed(&f);
+    f.voucher.attest(&f.attester, &first);
+    f.voucher.attest(&f.attester, &second);
+    advance(&f.env, DISPUTE_WINDOW + 1);
+    issuer.clawback(&f.voucher.address, &1);
+
+    // The shared balance still covers one voucher in full...
+    f.voucher.settle(&first);
+    assert_eq!(f.voucher.get_voucher(&first).status, VoucherStatus::Settled);
+    // ...and not the second, which keeps its status until the balance is restored.
+    let err = f.voucher.try_settle(&second).err().unwrap().unwrap();
+    assert_eq!(err, VoucherError::EscrowShortfall);
+    assert_eq!(
+        f.voucher.get_voucher(&second).status,
+        VoucherStatus::Attested
+    );
+
+    issuer.mint(&f.voucher.address, &1);
+    f.voucher.settle(&second);
+    assert_eq!(
+        f.voucher.get_voucher(&second).status,
+        VoucherStatus::Settled
+    );
+}
+
+#[test]
+fn frozen_escrow_returns_transfer_failed_until_unfrozen() {
+    let f = setup();
+    let issuer = issuer_with_clawback(&f);
+    let id = attested(&f);
+    issuer.set_authorized(&f.voucher.address, &false);
+
+    let err = f.voucher.try_settle(&id).err().unwrap().unwrap();
+    assert_eq!(err, VoucherError::TokenTransferFailed);
+    assert_eq!(f.voucher.get_voucher(&id).status, VoucherStatus::Attested);
+    assert_eq!(f.token.balance(&f.voucher.address), CONSULT_PRICE);
+
+    issuer.set_authorized(&f.voucher.address, &true);
+    f.voucher.settle(&id);
+    assert_eq!(f.voucher.get_voucher(&id).status, VoucherStatus::Settled);
+}
+
+#[test]
+fn frozen_provider_returns_transfer_failed() {
+    let f = setup();
+    let issuer = issuer_with_clawback(&f);
+    let id = attested(&f);
+    issuer.set_authorized(&f.provider, &false);
+
+    let err = f.voucher.try_settle(&id).err().unwrap().unwrap();
+    assert_eq!(err, VoucherError::TokenTransferFailed);
+    // The whole call reverted: nobody was paid, not even the fee.
+    assert_eq!(f.token.balance(&f.fee_account), 0);
+    assert_eq!(f.token.balance(&f.attester), 0);
+    assert_eq!(f.voucher.get_voucher(&id).status, VoucherStatus::Attested);
+}
+
+#[test]
+fn frozen_funder_returns_transfer_failed_on_refund() {
+    let f = setup();
+    let issuer = issuer_with_clawback(&f);
+    let id = fund(&f);
+    issuer.set_authorized(&f.funder, &false);
+    advance(&f.env, 31 * 24 * 60 * 60);
+
+    let err = f.voucher.try_refund(&id).err().unwrap().unwrap();
+    assert_eq!(err, VoucherError::TokenTransferFailed);
+    assert_eq!(f.voucher.get_voucher(&id).status, VoucherStatus::Funded);
+}
+
+// ----- restored from main (dropped by an earlier merge of this branch) -----
+
 #[test]
 fn not_initialized_errors() {
     let env = Env::default();
@@ -3250,3 +3983,254 @@ fn math_overflow_in_fee_calculation() {
 
 #[cfg(test)]
 mod costs;
+// ----- clinic capacity and per-clinic escrow cap -----
+
+fn settle_one(f: &Fixture, id: u64) {
+    f.voucher.claim(&f.provider, &id);
+    f.voucher.attest(&f.attester, &id);
+    advance(&f.env, DISPUTE_WINDOW + 1);
+    f.voucher.settle(&id);
+}
+
+fn try_fund(f: &Fixture, amount: i128) -> Result<u64, VoucherError> {
+    match f.voucher.try_create_voucher(
+        &f.funder,
+        &patient(&f.env),
+        &f.provider,
+        &CONSULT,
+        &amount,
+        &(f.env.ledger().timestamp() + 30 * 24 * 60 * 60),
+    ) {
+        Ok(Ok(id)) => Ok(id),
+        Err(Ok(e)) => Err(e),
+        other => panic!("unexpected result {other:?}"),
+    }
+}
+
+#[test]
+fn exposure_tracks_open_vouchers() {
+    let f = setup();
+    assert_eq!(f.voucher.get_exposure(&f.provider), Exposure::default());
+
+    let a = fund(&f);
+    fund(&f);
+    assert_eq!(
+        f.voucher.get_exposure(&f.provider),
+        Exposure {
+            vouchers: 2,
+            value: 2 * CONSULT_PRICE
+        }
+    );
+
+    settle_one(&f, a);
+    assert_eq!(
+        f.voucher.get_exposure(&f.provider),
+        Exposure {
+            vouchers: 1,
+            value: CONSULT_PRICE
+        }
+    );
+}
+
+#[test]
+fn capacity_rejects_vouchers_until_one_settles() {
+    let f = setup();
+    f.registry.set_capacity(&f.provider, &2);
+
+    let first = fund(&f);
+    fund(&f);
+    assert_eq!(
+        try_fund(&f, CONSULT_PRICE),
+        Err(VoucherError::ProviderAtCapacity)
+    );
+
+    settle_one(&f, first);
+    assert!(try_fund(&f, CONSULT_PRICE).is_ok(), "settling frees a slot");
+    assert_eq!(
+        try_fund(&f, CONSULT_PRICE),
+        Err(VoucherError::ProviderAtCapacity)
+    );
+}
+
+#[test]
+fn capacity_frees_a_slot_on_refund() {
+    let f = setup();
+    f.registry.set_capacity(&f.provider, &1);
+
+    let id = fund(&f);
+    assert_eq!(
+        try_fund(&f, CONSULT_PRICE),
+        Err(VoucherError::ProviderAtCapacity)
+    );
+
+    advance(&f.env, 31 * 24 * 60 * 60);
+    f.voucher.refund(&id);
+    assert_eq!(f.voucher.get_exposure(&f.provider), Exposure::default());
+    assert!(
+        try_fund(&f, CONSULT_PRICE).is_ok(),
+        "refunding frees a slot"
+    );
+}
+
+#[test]
+fn capacity_frees_a_slot_when_a_dispute_resolves() {
+    let f = setup();
+    f.registry.set_capacity(&f.provider, &1);
+
+    let id = fund(&f);
+    f.voucher.claim(&f.provider, &id);
+    f.voucher.dispute(&f.funder, &id, &1u32);
+    assert_eq!(
+        try_fund(&f, CONSULT_PRICE),
+        Err(VoucherError::ProviderAtCapacity)
+    );
+
+    f.voucher.resolve_dispute(&f.admin, &id, &true);
+    assert!(try_fund(&f, CONSULT_PRICE).is_ok());
+}
+
+#[test]
+fn zero_capacity_is_unlimited() {
+    let f = setup();
+    f.registry.set_capacity(&f.provider, &0);
+    for _ in 0..5 {
+        fund(&f);
+    }
+    assert_eq!(f.voucher.get_exposure(&f.provider).vouchers, 5);
+}
+
+#[test]
+fn escrow_cap_allows_exactly_the_cap() {
+    let f = setup();
+    f.voucher
+        .set_max_escrow_per_provider(&f.admin, &(2 * CONSULT_PRICE));
+    assert_eq!(f.voucher.get_max_escrow_per_provider(), 2 * CONSULT_PRICE);
+
+    fund(&f);
+    fund(&f);
+    // At the cap: one stroop more is refused.
+    assert_eq!(
+        try_fund(&f, CONSULT_PRICE),
+        Err(VoucherError::EscrowCapReached)
+    );
+    assert_eq!(f.voucher.get_exposure(&f.provider).value, 2 * CONSULT_PRICE);
+}
+
+#[test]
+fn escrow_cap_counts_the_new_amount() {
+    let f = setup();
+    f.voucher
+        .set_max_escrow_per_provider(&f.admin, &(CONSULT_PRICE + 5));
+
+    fund(&f);
+    // 5 stroops of room is below the listed price, so a voucher cannot fit.
+    assert_eq!(
+        try_fund(&f, CONSULT_PRICE),
+        Err(VoucherError::EscrowCapReached)
+    );
+}
+
+#[test]
+fn escrow_cap_releases_value_on_settle_and_refund() {
+    let f = setup();
+    f.voucher
+        .set_max_escrow_per_provider(&f.admin, &CONSULT_PRICE);
+
+    let id = fund(&f);
+    assert_eq!(
+        try_fund(&f, CONSULT_PRICE),
+        Err(VoucherError::EscrowCapReached)
+    );
+    settle_one(&f, id);
+
+    let id = try_fund(&f, CONSULT_PRICE).expect("settle released the value");
+    assert_eq!(
+        try_fund(&f, CONSULT_PRICE),
+        Err(VoucherError::EscrowCapReached)
+    );
+    advance(&f.env, 31 * 24 * 60 * 60);
+    f.voucher.refund(&id);
+
+    assert!(
+        try_fund(&f, CONSULT_PRICE).is_ok(),
+        "refund released the value"
+    );
+}
+
+#[test]
+fn escrow_cap_is_admin_only_and_not_negative() {
+    let f = setup();
+    let stranger = Address::generate(&f.env);
+    assert_eq!(
+        f.voucher.try_set_max_escrow_per_provider(&stranger, &1),
+        Err(Ok(VoucherError::NotAuthorized))
+    );
+    assert_eq!(
+        f.voucher.try_set_max_escrow_per_provider(&f.admin, &-1),
+        Err(Ok(VoucherError::InvalidEscrowCap))
+    );
+    assert_eq!(f.voucher.get_max_escrow_per_provider(), 0);
+}
+
+#[test]
+fn lowering_the_escrow_cap_does_not_trap_funded_vouchers() {
+    let f = setup();
+    let id = fund(&f);
+    fund(&f);
+    f.voucher.set_max_escrow_per_provider(&f.admin, &1);
+
+    assert_eq!(
+        try_fund(&f, CONSULT_PRICE),
+        Err(VoucherError::EscrowCapReached)
+    );
+    settle_one(&f, id);
+    assert_eq!(f.voucher.get_voucher(&id).status, VoucherStatus::Settled);
+}
+
+#[test]
+fn escrow_cap_changed_event_snapshot() {
+    let f = setup();
+
+    f.voucher
+        .set_max_escrow_per_provider(&f.admin, &(5 * CONSULT_PRICE));
+
+    let e = one_event(&f);
+    assert_layout(&e, "escrow_cap_changed", &[ScVal::from(&f.admin)], &["max"]);
+    assert_eq!(field_i128(&e, "max"), 5 * CONSULT_PRICE);
+}
+
+#[test]
+fn split_resolution_releases_open_escrow_and_exposure() {
+    let f = setup();
+    let id = claimed(&f);
+    f.voucher.dispute(&f.funder, &id, &1u32);
+
+    f.voucher.resolve_split(&f.admin, &id, &(CONSULT_PRICE / 2));
+
+    let (open_escrow, token_balance) = f.voucher.escrow_summary();
+    assert_eq!(
+        open_escrow, 0,
+        "the split voucher still counts as open escrow"
+    );
+    assert_eq!(token_balance, 0);
+    assert_eq!(f.voucher.get_exposure(&f.provider), Exposure::default());
+}
+
+#[test]
+fn reducing_a_voucher_lowers_the_clinics_exposure() {
+    let f = setup();
+    fund_overpaid(&f, CONSULT_PRICE * 2);
+    let id = fund_overpaid(&f, CONSULT_PRICE * 2);
+
+    f.voucher.reduce_amount(&f.funder, &id, &CONSULT_PRICE);
+
+    assert_eq!(
+        f.voucher.get_exposure(&f.provider),
+        Exposure {
+            vouchers: 2,
+            value: 3 * CONSULT_PRICE
+        }
+    );
+    let (open_escrow, _) = f.voucher.escrow_summary();
+    assert_eq!(open_escrow, 3 * CONSULT_PRICE);
+}
