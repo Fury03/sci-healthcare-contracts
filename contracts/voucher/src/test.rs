@@ -2495,8 +2495,11 @@ const AUTH_MATRIX: &[AuthCase] = &[
         auth: signer("`funder`", funder_addr),
     },
     AuthCase {
-        function: "create_voucher_at_price",
         function: "create_voucher_with_options",
+        auth: signer("`funder`", funder_addr),
+    },
+    AuthCase {
+        function: "create_voucher_at_price",
         auth: signer("`funder`", funder_addr),
     },
     AuthCase {
@@ -2655,6 +2658,9 @@ fn run_case(f: &AuthFixture, function: &str) -> std::vec::Vec<Address> {
         "create_voucher" => {
             fund(&f.f);
         }
+        "create_voucher_with_options" => {
+            fund_with(&f.f, &VoucherOptions::default());
+        }
         "create_voucher_at_price" => {
             voucher.create_voucher_at_price(
                 &f.f.funder,
@@ -2665,8 +2671,6 @@ fn run_case(f: &AuthFixture, function: &str) -> std::vec::Vec<Address> {
                 &(START_TIME + 30 * 24 * 60 * 60),
                 &CONSULT_PRICE,
             );
-        "create_voucher_with_options" => {
-            fund_with(&f.f, &VoucherOptions::default());
         }
         "reduce_amount" => {
             let id = fund_overpaid(&f.f, CONSULT_PRICE * 2);
@@ -3981,8 +3985,6 @@ fn math_overflow_in_fee_calculation() {
     assert_eq!(err, VoucherError::MathOverflow);
 }
 
-#[cfg(test)]
-mod costs;
 // ----- clinic capacity and per-clinic escrow cap -----
 
 fn settle_one(f: &Fixture, id: u64) {
@@ -4234,3 +4236,5 @@ fn reducing_a_voucher_lowers_the_clinics_exposure() {
     let (open_escrow, _) = f.voucher.escrow_summary();
     assert_eq!(open_escrow, 3 * CONSULT_PRICE);
 }
+#[cfg(test)]
+mod costs;

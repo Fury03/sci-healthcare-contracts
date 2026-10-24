@@ -160,7 +160,6 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAATYON",
-              "function_name": "create_voucher_at_price",
               "function_name": "create_voucher_with_options",
               "args": [
                 {
@@ -182,7 +181,6 @@
                   "u64": "1702592000"
                 },
                 {
-                  "i128": "30000000"
                   "map": [
                     {
                       "key": {

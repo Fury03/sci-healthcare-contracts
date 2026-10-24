@@ -163,8 +163,6 @@ impl VoucherEscrow {
         amount: i128,
         expires_at: u64,
     ) -> Result<u64, VoucherError> {
-        Self::create_voucher_inner(
-            env,
         Self::fund(
             &env,
             funder,
@@ -173,6 +171,7 @@ impl VoucherEscrow {
             service_code,
             amount,
             expires_at,
+            VoucherOptions::default(),
             None,
         )
     }
@@ -185,7 +184,25 @@ impl VoucherEscrow {
     /// keeps reading the current price for callers that do not care.
     #[allow(clippy::too_many_arguments)]
     pub fn create_voucher_at_price(
+        env: Env,
+        funder: Address,
+        beneficiary_ref: BytesN<32>,
+        provider: Address,
+        service_code: u32,
+        amount: i128,
+        expires_at: u64,
+        expected_price: i128,
+    ) -> Result<u64, VoucherError> {
+        Self::fund(
+            &env,
+            funder,
+            beneficiary_ref,
+            provider,
+            service_code,
+            amount,
+            expires_at,
             VoucherOptions::default(),
+            Some(expected_price),
         )
     }
 
@@ -209,10 +226,6 @@ impl VoucherEscrow {
         service_code: u32,
         amount: i128,
         expires_at: u64,
-        expected_price: i128,
-    ) -> Result<u64, VoucherError> {
-        Self::create_voucher_inner(
-            env,
         options: VoucherOptions,
     ) -> Result<u64, VoucherError> {
         Self::fund(
@@ -223,22 +236,8 @@ impl VoucherEscrow {
             service_code,
             amount,
             expires_at,
-            Some(expected_price),
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn create_voucher_inner(
-        env: Env,
-        funder: Address,
-        beneficiary_ref: BytesN<32>,
-        provider: Address,
-        service_code: u32,
-        amount: i128,
-        expires_at: u64,
-        expected_price: Option<i128>,
-    ) -> Result<u64, VoucherError> {
             options,
+            None,
         )
     }
 
@@ -270,14 +269,6 @@ impl VoucherEscrow {
         if price == 0 {
             return Err(VoucherError::ServiceNotOffered);
         }
-        // The funder signed a specific price. Reject before any money moves
-        // if the clinic has changed it since, in either direction.
-        if let Some(expected) = expected_price {
-            if price != expected {
-                return Err(VoucherError::PriceChanged);
-            }
-        }
-        if amount < price {
         if voucher.amount < price {
             return Err(VoucherError::AmountBelowPrice);
         }
@@ -885,6 +876,7 @@ impl VoucherEscrow {
         amount: i128,
         expires_at: u64,
         options: VoucherOptions,
+        expected_price: Option<i128>,
     ) -> Result<u64, VoucherError> {
         funder.require_auth();
 
@@ -914,6 +906,13 @@ impl VoucherEscrow {
         let price = registry.get_service_price(&provider, &service_code);
         if price == 0 {
             return Err(VoucherError::ServiceNotOffered);
+        }
+        // The funder signed a specific price. Reject before any money moves
+        // if the clinic has changed it since, in either direction.
+        if let Some(expected) = expected_price {
+            if price != expected {
+                return Err(VoucherError::PriceChanged);
+            }
         }
         if amount < price {
             return Err(VoucherError::AmountBelowPrice);

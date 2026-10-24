@@ -43,6 +43,9 @@ use storage::{
 /// 24 hours, so a funder who has just seen a price can still pay it.
 pub const MIN_PRICE_NOTICE_SECS: u64 = 24 * 60 * 60;
 
+/// Most providers one `list_providers` call may return.
+pub use storage::MAX_PROVIDERS_PAGE;
+
 /// A scheduled price at least this many times the current one is treated as
 /// a probable typo and rejected unless the caller passes
 /// `confirm_large_change = true`.
@@ -51,8 +54,6 @@ pub const MIN_PRICE_NOTICE_SECS: u64 = 24 * 60 * 60;
 /// that is already scheduled. Lowering a price, or scheduling the current
 /// price to call a change off, never needs the flag.
 pub const MAX_PRICE_JUMP: u32 = 5;
-/// Most providers one `list_providers` call may return.
-pub use storage::MAX_PROVIDERS_PAGE;
 
 #[contract]
 pub struct Registry;

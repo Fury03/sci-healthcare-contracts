@@ -53,7 +53,7 @@ bytes to that entry and its rent.
 | `registry` | `Service(provider, code)` | persistent | 1555200 | 372 | 0.5580000 | 5580000 |
 | `registry` | `Attester(address)` | persistent | 1555200 | 132 | 0.1980000 | 1980000 |
 | `voucher` | contract instance (`Config`, `NextId`, `OpenEscrow`, `AttestationCap`) | persistent | 518400 | 668 | 0.3340000 | 3340000 |
-| `voucher` | `Voucher(id)` | persistent | 1555200 | 580 | 0.8700000 | 8700000 |
+| `voucher` | `Voucher(id)` | persistent | 1555200 | 328 | 0.4920000 | 4920000 |
 | `voucher` | `Attestations(attester, day)` | temporary | 34560 | 148 | 0.0024667 | 24667 |
 | `receipt` | contract instance (`Admin`, `Minter`) | persistent | 518400 | 244 | 0.1220000 | 1220000 |
 | `receipt` | `Receipt(voucher_id)` | persistent | 1555200 | 356 | 0.5340000 | 5340000 |
@@ -73,7 +73,7 @@ that never calls `set_attestation_cap` has a slightly smaller voucher instance.
 
 ## What a voucher costs
 
-A funded voucher keeps one `Voucher(id)` entry alive for 90 days: **0.87 XLM**
+A funded voucher keeps one `Voucher(id)` entry alive for 90 days: **0.492 XLM**
 at the parameters above. Settling it adds a `Receipt(voucher_id)`, a
 `Count(beneficiary_ref)` and two provider-index entries in the receipt book
 (0.534 + 0.198 + 0.210 + 0.228 = **1.17 XLM**), plus one temporary

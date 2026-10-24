@@ -6,8 +6,7 @@ use soroban_sdk::{
 };
 
 use crate::{
-    ProviderStatus, Registry, RegistryClient, RegistryError, MAX_PRICE_JUMP, MIN_PRICE_NOTICE_SECS,
-    ProviderStatus, Registry, RegistryClient, RegistryError, MAX_PROVIDERS_PAGE,
+    ProviderStatus, Registry, RegistryClient, RegistryError, MAX_PRICE_JUMP, MAX_PROVIDERS_PAGE,
     MIN_PRICE_NOTICE_SECS,
 };
 

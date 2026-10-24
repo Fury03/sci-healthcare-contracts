@@ -208,8 +208,8 @@ pub struct Exposure {            // a clinic's open vouchers
 | --- | --- | --- | --- |
 | `initialize` | `admin, registry, receipt_book, token, dispute_window, fee_bps, attester_share_bps, fee_account` | `()` | once |
 | `create_voucher` | `funder, beneficiary_ref, provider, service_code, amount, expires_at` | `u64` | `funder` |
-| `create_voucher_at_price` | `funder, beneficiary_ref, provider, service_code, amount, expires_at, expected_price` | `u64` | `funder` |
 | `create_voucher_with_options` | `funder, beneficiary_ref, provider, service_code, amount, expires_at, options: VoucherOptions` | `u64` | `funder` |
+| `create_voucher_at_price` | `funder, beneficiary_ref, provider, service_code, amount, expires_at, expected_price` | `u64` | `funder` |
 | `reduce_amount` | `funder, voucher_id, new_amount` | `()` | `funder` |
 | `redirect` | `funder, voucher_id, new_provider` | `()` | `funder` |
 | `claim` | `provider, voucher_id` | `()` | `provider` |
@@ -252,8 +252,8 @@ Every public function, with the exact signer it demands. `AUTH_MATRIX` in `contr
 | --- | --- |
 | `initialize` | none (one-shot) |
 | `create_voucher` | `funder` |
-| `create_voucher_at_price` | `funder` |
 | `create_voucher_with_options` | `funder` |
+| `create_voucher_at_price` | `funder` |
 | `reduce_amount` | `funder` |
 | `redirect` | `funder` |
 | `claim` | `provider` |
@@ -343,7 +343,6 @@ rejects the voucher's own provider even if it holds that role.
 |  |  | 20 | `InvalidAttestationCap` |
 |  |  | 21 | `InvalidAttesterShare` |
 |  |  | 22 | `AmountNotReduced` |
-|  |  | 23 | `PriceChanged` |
 |  |  | 23 | `EscrowShortfall` |
 |  |  | 24 | `TokenTransferFailed` |
 |  |  | 25 | `ProviderAtCapacity` |
@@ -353,6 +352,7 @@ rejects the voucher's own provider even if it holds that role.
 |  |  | 29 | `InvalidPresenceProof` |
 |  |  | 30 | `NoPresenceCommitment` |
 |  |  | 31 | `InvalidDisputeWindow` |
+|  |  | 42 | `PriceChanged` |
 
 ### Events
 
